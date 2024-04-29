@@ -2,6 +2,7 @@ import numpy as np
 from models_list import kaomojis
 import os
 import re
+from PIL import Image
 
 
 def modify_files_in_directory(directory, text, prepend=False):
@@ -101,3 +102,54 @@ def remove_duplicates(dir_path):
             file.write(', '.join(content))
 
     return "Duplicates removed successfully"
+
+
+def resize_images(input_dir, output_dir, width, height):
+    # Create output directory if it doesn't exist
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    # Get all files in the input directory
+    files = os.listdir(input_dir)
+
+    for file in files:
+        # Check if file is an image
+        if file.endswith(".jpg") or file.endswith(".png") or file.endswith(".jpeg"):
+            # Open image
+            img = Image.open(os.path.join(input_dir, file))
+
+            # Get current dimensions
+            img_width, img_height = img.size
+
+            # Calculate aspect ratio
+            aspect_ratio = img_width / img_height
+
+            # Check if image dimensions meet the requirement
+            if img_width < width or img_height < height:
+                # If image height is less than required height
+                if img_height < height:
+                    new_height = height
+                    new_width = int(new_height * aspect_ratio)
+                # If image width is less than required width
+                elif img_width < width:
+                    new_width = width
+                    new_height = int(new_width / aspect_ratio)
+
+                # Resize image while maintaining aspect ratio
+                img = img.resize((new_width, new_height))
+
+            else:
+                # Resize image to fit within specified dimensions while maintaining aspect ratio
+                if img_width / width > img_height / height:
+                    new_width = width
+                    new_height = int(new_width / aspect_ratio)
+                else:
+                    new_height = height
+                    new_width = int(new_height * aspect_ratio)
+
+                img = img.resize((new_width, new_height))
+
+            # Save resized image
+            img.save(os.path.join(output_dir, file))
+
+    return "Image resized"

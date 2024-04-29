@@ -1,7 +1,7 @@
 import gradio as gr
 from models_list import models, SWINV2_MODEL_DSV3_REPO
 from predictor import Predictor
-from utility import modify_files_in_directory, search_and_replace, remove_duplicates
+from utility import modify_files_in_directory, search_and_replace, remove_duplicates, resize_images
 import deepdanbooru as dd
 
 
@@ -249,12 +249,15 @@ def main():
 
         with gr.Tab('Image Resizer'):
             with gr.Row():
-                dpath = gr.Textbox(label="Enter the path to the files directory")
-                width = gr.Slider(label="Width", value=512)
-                height = gr.Slider(label="Text to replace with", value=512)
+                input_dir = gr.Textbox(label="Enter the path to the files directory")
+            with gr.Row():
+                output_dir = gr.Textbox(label="Enter the path to the files directory")
+            with gr.Row():
+                width = gr.Slider(100, 2000, step=50, label="Width", value=512)
+                height = gr.Slider(100, 2000, step=50, label="Height", value=768)
                 output = gr.Textbox(label='Status')
             btn = gr.Button(value='Submit', variant='primary', size='lg')
-            btn.click(fn=search_and_replace, inputs=[dpath, width, height], outputs=output)
+            btn.click(fn=resize_images, inputs=[input_dir, output_dir, width, height], outputs=output)
 
     iface.queue(max_size=1)
     iface.launch(debug=True)

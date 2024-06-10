@@ -9,7 +9,7 @@ from PIL import Image
 import tensorflow as tf
 import deepdanbooru as dd
 # from utils import load_labels, mcut_threshold
-
+import csv
 
 def load_labels(dataframe):
     name_series = dataframe["name"]
@@ -230,13 +230,56 @@ class Predictor:
         final_tags = "\n".join(processed_files)
         return final_tags, final_score
 
-    def load_deepbooru_model(self):
-        path = huggingface_hub.hf_hub_download(
-            "public-data/DeepDanbooru",
-            "model-resnet_custom_v3.h5",
-            resume_download=True
-        )
-        model = tf.keras.models.load_model(path)
+    def prepare_deepbooru_image(self, image, target_size):
+        # Pad image to square
+        image_shape = image.size
+        max_dim = max(image_shape)
+        pad_left = (max_dim - image_shape[0]) // 2
+        pad_top = (max_dim - image_shape[1]) // 2
+
+        padded_image = Image.new("RGB", (max_dim, max_dim), (255, 255, 255))
+        padded_image.paste(image, (pad_left, pad_top))
+
+        # Resize
+        if max_dim != target_size:
+            padded_image = padded_image.resize((target_size, target_size), Image.BICUBIC)
+
+        # Convert to numpy array
+        # Based on the ONNX graph, the model appears to expect inputs in the range of 0-255
+        image_array = np.asarray(padded_image, dtype=np.float32)
+
+        # Convert PIL-native RGB to BGR
+        image_array = image_array[:, :, ::-1]
+
+        return np.expand_dims(image_array, axis=0)
+
+    def deepbooru_predict(self, image):
+        image_array = self.prepare_deepbooru_image(image, 448)
+        input_name = 'input_1:0'
+        output_name = 'predictions_sigmoid'
+
+        result = self.booru_model.run([output_name], {input_name: image_array})
+        result = result[0][0]
+        with open(self.booru_labels, mode='r', encoding='utf-8') as file:
+            csv_reader = csv.DictReader(file)
+            tags = [row['name'].strip() for row in csv_reader]
+        scores = {tags[i]: result[i] for i in range(len(result))}
+        predicted_tags = [tag for tag, score in scores.items() if score > self.booru_score_threshold]
+        tag_string = ', '.join(predicted_tags)
+
+        return tag_string, scores
+
+    def load_deepbooru_model(self, model_repo):
+        if 'toynya/Z3D-E621-Convnext' == model_repo:
+            model_path = huggingface_hub.hf_hub_download(model_repo, 'model.onnx', resume_download=True)
+            model = ort.InferenceSession(model_path)
+        else:
+            path = huggingface_hub.hf_hub_download(
+                "public-data/DeepDanbooru",
+                model_repo,
+                resume_download=True
+            )
+            model = tf.keras.models.load_model(path)
         return model
 
     def load_deepbooru_labels(self):
@@ -268,9 +311,17 @@ class Predictor:
         result_text = ", ".join(result_all.keys())
         return result_threshold, result_all, result_text
 
-    def predict_deepbooru(self, dir_name, score_threshold):
-        self.booru_model = self.load_deepbooru_model()
-        self.booru_labels = self.load_deepbooru_labels()
+    def predict_deepbooru(self, dir_name, model_repo, score_threshold):
+        self.booru_score_threshold = score_threshold
+        is_toyna = False
+        if 'toynya/Z3D-E621-Convnext' == model_repo:
+            is_toyna = True
+            csv_path = huggingface_hub.hf_hub_download(model_repo, 'tags-selected.csv', resume_download=True)
+            self.booru_labels = csv_path
+        else:
+            self.booru_labels = self.load_deepbooru_labels()
+
+        self.booru_model = self.load_deepbooru_model(model_repo)
 
         processed_files = []
         words_counting = []
@@ -279,21 +330,26 @@ class Predictor:
             if image.lower().endswith(('png', 'jpg', 'jpeg', 'bmp', 'gif')):
                 img_path = os.path.join(dir_name, image)
                 with Image.open(img_path) as r_image:
-                    result_threshold, result_all, result_text = self.process_deepbooru_image(r_image, score_threshold)
-
-                    words_counting.extend(list(result_all.keys()))
+                    if is_toyna:
+                        result_text, result_threshold = self.deepbooru_predict(r_image)
+                    else:
+                        result_threshold, result_all, result_text = self.process_deepbooru_image(r_image, score_threshold)
+                    if not is_toyna:
+                        words_counting.extend(list(result_all.keys()))
                     caption_file_path = os.path.join(dir_name, f"{os.path.splitext(image)[0]}.txt")
                     with open(caption_file_path, 'w') as f:
                         f.write(result_text)
 
                     processed_files.append(image)
-        words = count_words(words_counting)
-        # Create a list of formatted items
-        words = dict(sorted(words.items(), key=lambda item: item[1], reverse=True))
-        formatted_items = [f"<li> {key} ({value})</li>" for key, value in words.items()]
+        final_score = ''
+        if not is_toyna:
+            words = count_words(words_counting)
+            # Create a list of formatted items
+            words = dict(sorted(words.items(), key=lambda item: item[1], reverse=True))
+            formatted_items = [f"<li> {key} ({value})</li>" for key, value in words.items()]
 
-        # Join the list items into a single string
-        result = "".join(formatted_items)
-        final_score = "<h1>Tags Occurrence</h1><ul style='list-style:none'>" + result + "</ul>"
+            # Join the list items into a single string
+            result = "".join(formatted_items)
+            final_score = "<h1>Tags Occurrence</h1><ul style='list-style:none'>" + result + "</ul>"
         final_tags = "\n".join(processed_files)
         return final_tags, final_score

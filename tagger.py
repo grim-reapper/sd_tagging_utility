@@ -179,6 +179,12 @@ def main():
                         with gr.Column(variant="panel"):
                             dir_name = gr.Textbox(label='Input Directory')
                             with gr.Row():
+                                model_repo = gr.Dropdown(
+                                    ['toynya/Z3D-E621-Convnext', 'model-resnet_custom_v3.h5'],
+                                    value='toynya/Z3D-E621-Convnext',
+                                    label="Model",
+                                )
+                            with gr.Row():
                                 score_thresh = gr.Slider(
                                     0,
                                     1,
@@ -186,11 +192,11 @@ def main():
                                     value=0.5,
                                     label="Score Threshold",
                                 )
-
                             with gr.Row():
                                 clear = gr.ClearButton(
                                     components=[
                                         dir_name,
+                                        model_repo,
                                         score_thresh,
                                     ],
                                     variant='secondary',
@@ -212,6 +218,7 @@ def main():
                     fn=predictor.predict_deepbooru,
                     inputs=[
                         dir_name,
+                        model_repo,
                         score_thresh,
                     ],
                     outputs=[sorted_general_strings, general_res]

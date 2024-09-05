@@ -10,6 +10,8 @@ import tensorflow as tf
 import deepdanbooru as dd
 # from utils import load_labels, mcut_threshold
 import csv
+from tqdm import tqdm
+
 
 def load_labels(dataframe):
     name_series = dataframe["name"]
@@ -326,7 +328,7 @@ class Predictor:
         processed_files = []
         words_counting = []
 
-        for image in os.listdir(dir_name):
+        for image in tqdm(os.listdir(dir_name)):
             if image.lower().endswith(('png', 'jpg', 'jpeg', 'bmp', 'gif')):
                 img_path = os.path.join(dir_name, image)
                 with Image.open(img_path) as r_image:

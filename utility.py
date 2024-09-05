@@ -3,7 +3,7 @@ from models_list import kaomojis
 import os
 import re
 from PIL import Image
-
+from tqdm import tqdm
 
 def modify_files_in_directory(directory, text, prepend=False):
     # Get a list of all files in the directory
@@ -11,7 +11,7 @@ def modify_files_in_directory(directory, text, prepend=False):
     files = [f for f in os.listdir(directory) if os.path.isfile(os.path.join(directory, f))]
 
     # Iterate over each file
-    for file_name in files:
+    for file_name in tqdm(files):
         if file_name.endswith('.txt'):
             file_path = os.path.join(directory, file_name)
 
@@ -39,7 +39,7 @@ def search_and_replace(directory, search_pattern, replacement_text):
     files = [f for f in os.listdir(directory) if os.path.isfile(os.path.join(directory, f))]
 
     # Iterate over each file
-    for file_name in files:
+    for file_name in tqdm(files):
         if file_name.endswith('.txt'):
             file_path = os.path.join(directory, file_name)
 
@@ -89,7 +89,7 @@ def mcut_threshold(probs):
 
 def remove_duplicates(dir_path):
     txt_files = [f for f in os.listdir(dir_path) if f.endswith('.txt')]
-    for file_name in txt_files:
+    for file_name in tqdm(txt_files):
         file_path = os.path.join(dir_path, file_name)
         with open(file_path, 'r') as file:
             content = file.read().strip().split(',')
@@ -112,7 +112,7 @@ def resize_images(input_dir, output_dir, width, height):
     # Get all files in the input directory
     files = os.listdir(input_dir)
 
-    for file in files:
+    for file in tqdm(files):
         # Check if file is an image
         if file.endswith(".jpg") or file.endswith(".png") or file.endswith(".jpeg"):
             # Open image

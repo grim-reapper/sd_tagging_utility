@@ -1,8 +1,235 @@
 import gradio as gr
+import glob
+import os
 from models_list import models, SWINV2_MODEL_DSV3_REPO
 from predictor import Predictor
 from utility import modify_files_in_directory, search_and_replace, remove_duplicates, resize_images
 import deepdanbooru as dd
+import torch
+from PIL import Image
+from transformers import BlipProcessor, BlipForConditionalGeneration
+from safetensors.torch import load_file, save_file
+
+
+def extract_lora(checkpoint_path, output_name, progress=gr.Progress()):
+    if not os.path.exists(checkpoint_path):
+        return "Error: Checkpoint file not found."
+
+    try:
+        # Load the checkpoint
+        progress(0, desc="Loading checkpoint...")
+        checkpoint = load_file(checkpoint_path)
+
+        # Function to identify LoRA weights based on naming conventions
+        def is_lora_weight(key):
+            # Common naming conventions for LoRA weights
+            lora_keywords = ['lora', 'lora_up', 'lora_down', 'lora_alpha']
+            return any(keyword in key for keyword in lora_keywords)
+
+        # Extract LoRA weights
+        progress(0.3, desc="Identifying LoRA weights...")
+        lora_weights = {k: v for k, v in checkpoint.items() if is_lora_weight(k)}
+
+        if not lora_weights:
+            return "Error: No LoRA weights found in the checkpoint."
+
+        # Save the extracted LoRA weights
+        progress(0.7, desc="Saving LoRA weights...")
+        output_path = f"{output_name}.safetensors"
+        save_file(lora_weights, output_path)
+
+        progress(1, desc="Extraction complete!")
+        return f"LoRA weights extracted and saved to {output_path}"
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+# Function to load LoRA models in safetensors format
+def load_lora_model(lora_path):
+    return load_file(lora_path)
+
+# Function to resize tensors if shapes are different
+def resize_tensor(tensor, target_shape):
+    # Determine the smaller and larger shapes
+    smaller_shape = min(tensor.shape, target_shape, key=lambda x: sum(x))
+    larger_shape = max(tensor.shape, target_shape, key=lambda x: sum(x))
+
+    # Resize the larger tensor to match the smaller one
+    if tensor.shape == larger_shape:
+        tensor = tensor[:smaller_shape[0], :smaller_shape[1]]
+
+    return tensor
+
+# Function to merge two LoRA models with progress callback
+def merge_lora_models(lora_1, lora_2, alpha=0.5, progress=None):
+    total_keys = len(lora_1.keys()) + len(lora_2.keys())
+    merged_lora = {}
+    processed_keys = 0
+
+    # Merging common keys
+    for key in lora_1.keys():
+        tensor_1 = lora_1[key]
+
+        if key in lora_2:
+            tensor_2 = lora_2[key]
+            # Resize tensors if shapes are different
+            if tensor_1.shape != tensor_2.shape:
+                tensor_1 = resize_tensor(tensor_1, tensor_2.shape)
+                tensor_2 = resize_tensor(tensor_2, tensor_1.shape)
+
+            # Merge the tensors
+            merged_lora[key] = (alpha * tensor_1 + (1 - alpha) * tensor_2).to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
+        else:
+            # If the key is not in lora_2, just keep tensor_1
+            merged_lora[key] = tensor_1.to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
+
+        processed_keys += 1
+        if progress is not None:
+            progress(processed_keys / total_keys)
+
+    # Adding remaining keys from lora_2
+    for key in lora_2.keys():
+        if key not in merged_lora:
+            merged_lora[key] = lora_2[key].to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
+        processed_keys += 1
+        if progress is not None:
+            progress(processed_keys / total_keys)
+
+    return merged_lora
+
+# Function to save merged LoRA to safetensors format
+def save_lora_model(merged_lora, output_path):
+    save_file(merged_lora, output_path)
+
+# Gradio interface function with progress bar
+def merge_lora_files(lora_1_path, lora_2_path, output_path, alpha, progress=gr.Progress(track_tqdm=True)):
+    progress(0)  # Initialize progress
+    try:
+        # Load LoRA models
+        lora_1 = load_lora_model(lora_1_path)
+        lora_2 = load_lora_model(lora_2_path)
+
+        # Merge the LoRA models
+        merged_lora = merge_lora_models(lora_1, lora_2, alpha, progress=progress)
+
+        # Save the merged LoRA model
+        save_lora_model(merged_lora, output_path)
+        return f"Successfully merged and saved at: {output_path}"
+    except Exception as e:
+        return f"Error during merging: {str(e)}"
+
+
+# Function to load models
+def load_models():
+    processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-large")
+    model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-large")
+    return processor, model
+
+
+def generate_caption(image, text=None, max_length=50, min_length=10, num_beams=4, no_repeat_ngram_size=2, progress=gr.Progress()):
+    if image is None:
+        return
+    processor, model = load_models()
+    # Convert the image to RGB format
+    raw_image = image.convert('RGB')
+
+    progress(0, desc="Processing image...")
+
+    if text:
+        # Conditional image captioning
+        inputs = processor(raw_image, text, return_tensors="pt")
+    else:
+        # Unconditional image captioning
+        inputs = processor(raw_image, return_tensors="pt")
+
+    progress(0.5, desc="Generating caption...")
+
+    # Generate caption with specified parameters
+    out = model.generate(
+        **inputs,
+        max_length=max_length,
+        min_length=min_length,
+        num_beams=num_beams,
+        no_repeat_ngram_size=no_repeat_ngram_size
+    )
+    caption = processor.decode(out[0], skip_special_tokens=True)
+
+    progress(1, desc="Caption generated!")
+
+    return caption
+
+def process_directory(directory, text=None, max_length=50, min_length=10, num_beams=4, no_repeat_ngram_size=2, progress=gr.Progress()):
+    # List all image files in the directory
+    image_files = glob.glob(os.path.join(directory, '*.jpg')) + glob.glob(os.path.join(directory, '*.jpeg')) + glob.glob(os.path.join(directory, '*.png'))
+
+    total_images = len(image_files)
+    progress(0, desc=f"Processing {total_images} images...")
+
+    for i, image_path in enumerate(image_files):
+        # Open the image
+        image = Image.open(image_path)
+
+        # Generate caption
+        caption = generate_caption(image, text, max_length, min_length, num_beams, no_repeat_ngram_size, progress)
+
+        # Save the caption to a .txt file with the same name as the image
+        caption_file = os.path.splitext(image_path)[0] + '.txt'
+        with open(caption_file, 'w') as f:
+            f.write(caption)
+
+        progress((i + 1) / total_images, desc=f"Processed {i + 1}/{total_images} images")
+
+    progress(1, desc="All images processed!")
+
+
+def load_model_weights(file_path):
+    return load_file(file_path)
+
+
+def save_model_weights(model_weights, output_path):
+    save_file(model_weights, output_path)
+
+
+def combine_sdxl_and_vae(sdxl_checkpoint_path, vae_path, output_path, progress=gr.Progress()):
+    # Load the SDXL checkpoint
+    sdxl_weights = load_model_weights(sdxl_checkpoint_path)
+    progress(0.3, desc="Loaded SDXL checkpoint")
+
+    # Load the VAE
+    vae_state_dict = load_model_weights(vae_path)
+    progress(0.6, desc="Loaded VAE")
+
+    # Combine the weights
+    vae_state_dict_with_prefix = {f"first_stage_model.{k}": v for k, v in vae_state_dict.items()}
+    # The SDXL checkpoint will have the model weights, we add the VAE to it
+    sdxl_weights.update(vae_state_dict_with_prefix)  # Merge VAE state_dict into the SDXL checkpoint
+    progress(0.8, desc="Baking VAE into the SDXL checkpoint...")
+
+    # Save the combined model
+    save_file(sdxl_weights, output_path)
+    progress(1.0, desc="Saved new SDXL checkpoint with VAE")
+
+    return "Success: SDXL checkpoint with VAE baked in saved to " + output_path
+
+
+def create_checkpoint_interface():
+    with gr.Column():
+        sdxl_checkpoint_input = gr.Textbox(label="SDXL Checkpoint Path",
+                                           placeholder="path/to/sdxl_checkpoint.safetensors")
+        vae_input = gr.Textbox(label="VAE Path", placeholder="path/to/sdxl_vae.safetensors")
+        output_path_input = gr.Textbox(label="Output Path", placeholder="path/to/combined_sdxl_checkpoint.safetensors")
+
+        combine_button = gr.Button("Combine Models")
+        output_text = gr.Textbox(label="Result")
+
+        combine_button.click(
+            fn=combine_sdxl_and_vae,
+            inputs=[sdxl_checkpoint_input, vae_input, output_path_input],
+            outputs=output_text,
+            api_name="combine_models"
+        )
+
+        progress_bar = gr.Progress(track_tqdm=True)
 
 
 def main():
@@ -224,6 +451,27 @@ def main():
                     outputs=[sorted_general_strings, general_res]
                 )
 
+                with gr.Tab("Salesforce Blip Captioning"):
+                    with gr.Row():
+                        image_input = gr.Image(type="pil", label="Upload an image")
+                        text_input = gr.Textbox(label="Optional: Add a prefix for conditional captioning", placeholder="e.g., 'a photography of'")
+                        directory_input = gr.Textbox(label="Directory containing images", placeholder="e.g., /path/to/images")
+                        max_length_input = gr.Slider(minimum=10, maximum=100, step=1, value=50, label="Maximum Caption Length")
+                        min_length_input = gr.Slider(minimum=10, maximum=100, step=1, value=10, label="Minimum Caption Length")
+                        num_beams_input = gr.Slider(minimum=1, maximum=10, step=1, value=4, label="Number of Beams")
+                        no_repeat_ngram_size_input = gr.Slider(minimum=1, maximum=5, step=1, value=2, label="No Repeat N-gram Size")
+                        process_button = gr.Button("Process Directory")
+                    caption_output = gr.Textbox(label="Generated Caption")
+
+                    image_input.change(generate_caption, inputs=[image_input, text_input, max_length_input, min_length_input, num_beams_input, no_repeat_ngram_size_input], outputs=caption_output)
+                    text_input.change(generate_caption, inputs=[image_input, text_input, max_length_input, min_length_input, num_beams_input, no_repeat_ngram_size_input], outputs=caption_output)
+                    max_length_input.change(generate_caption, inputs=[image_input, text_input, max_length_input, min_length_input, num_beams_input, no_repeat_ngram_size_input], outputs=caption_output)
+                    min_length_input.change(generate_caption, inputs=[image_input, text_input, max_length_input, min_length_input, num_beams_input, no_repeat_ngram_size_input], outputs=caption_output)
+                    num_beams_input.change(generate_caption, inputs=[image_input, text_input, max_length_input, min_length_input, num_beams_input, no_repeat_ngram_size_input], outputs=caption_output)
+                    no_repeat_ngram_size_input.change(generate_caption, inputs=[image_input, text_input, max_length_input, min_length_input, num_beams_input, no_repeat_ngram_size_input], outputs=caption_output)
+
+                    process_button.click(process_directory, inputs=[directory_input, text_input, max_length_input, min_length_input, num_beams_input, no_repeat_ngram_size_input], outputs=[])
+
         with gr.Tab('Append/Prepend Tags'):
             with gr.Column():
                 gr.Markdown(value=f"<h2>Generate prompt for image</h2>")
@@ -265,6 +513,40 @@ def main():
                 output = gr.Textbox(label='Status')
             btn = gr.Button(value='Submit', variant='primary', size='lg')
             btn.click(fn=resize_images, inputs=[input_dir, output_dir, width, height], outputs=output)
+
+        with gr.Tab('Merge Loras'):
+            with gr.Row():
+                lora_1 = gr.File(label="LoRA Model 1 (.safetensors)")
+            with gr.Row():
+                lora_2 = gr.File(label="LoRA Model 2 (.safetensors)")
+            with gr.Row():
+                alpha = gr.Slider(0, 1, step=0.01, value=0.5, label="Merge Ratio (alpha)")
+            with gr.Row():
+                output_path = gr.Textbox(label="Output Path (with .safetensors extension)", placeholder="e.g., ./merged_model.safetensors")
+            with gr.Row():
+                output = gr.Textbox(label='Status')
+            btn = gr.Button(value='Merge', variant='primary', size='lg')
+            btn.click(fn=merge_lora_files, inputs=[lora_1, lora_2, output_path, alpha], outputs=output)
+
+        with gr.Tab('Lora Extractor'):
+            with gr.Row():
+                checkpoint_input = gr.Textbox(label="Safetensors checkpoint file path", placeholder="Enter Checkpoint File (safetensors) file")
+            with gr.Row():
+                output_name_input = gr.Textbox(label="Output Name", placeholder="Enter the name for the extracted LoRA file")
+            with gr.Row():
+                extract_button = gr.Button("Extract LoRA")
+            with gr.Row():
+                output_text = gr.Textbox(label="Output")
+
+            extract_button.click(
+                fn=extract_lora,
+                inputs=[checkpoint_input, output_name_input],
+                outputs=output_text
+            )
+
+        with gr.Tab('Bake in VAE into SDXL Model'):
+            gr.Markdown("# SDXL Checkpoint and VAE Combiner")
+            create_checkpoint_interface()
 
     iface.queue(max_size=1)
     iface.launch(debug=True)

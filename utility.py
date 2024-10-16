@@ -4,6 +4,7 @@ import os
 import re
 from PIL import Image
 from tqdm import tqdm
+from caption_models import qwen_caption, florence_caption
 
 def modify_files_in_directory(directory, text, prepend=False):
     # Get a list of all files in the directory
@@ -153,3 +154,14 @@ def resize_images(input_dir, output_dir, width, height):
             img.save(os.path.join(output_dir, file))
 
     return "Image resized"
+
+
+def create_caption(image, model):
+    if image is not None:
+        if model == "Florence-2":
+            return florence_caption(image)
+        elif model == "Qwen2-VL":
+            return qwen_caption(image)
+        # elif model == "JoyCaption":
+        #     return joycaption(image)
+    return ""
